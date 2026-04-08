@@ -46,7 +46,7 @@ export function parseRedirectFromState(state) {
   }
 }
 
-export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
+export function getAuthenticatedGmailClient() {
   if (!tokenStore.hasTokens()) {
     const error = new Error('Not authenticated. Start OAuth at /auth/google');
     error.statusCode = 401;
@@ -55,8 +55,34 @@ export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
 
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials(tokenStore.get());
+  return google.gmail({ version: 'v1', auth: oauth2Client });
+}
 
-  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+function headerValue(headers, name) {
+  return headers.find((item) => item.name?.toLowerCase() === name.toLowerCase())?.value || '';
+}
+
+export async function getMessageMetadata(gmail, messageId) {
+  const message = await gmail.users.messages.get({
+    userId: 'me',
+    id: messageId,
+    format: 'metadata',
+    metadataHeaders: ['Subject', 'From', 'Date'],
+  });
+
+  const headers = message.data.payload?.headers || [];
+  return {
+    id: messageId,
+    messageId,
+    subject: headerValue(headers, 'Subject'),
+    from: headerValue(headers, 'From'),
+    date: headerValue(headers, 'Date'),
+    snippet: message.data.snippet || '',
+  };
+}
+
+export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
+  const gmail = getAuthenticatedGmailClient();
 
   const listResponse = await gmail.users.messages.list({
     userId: 'me',
@@ -65,8 +91,8 @@ export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
     includeSpamTrash: true,
   });
 
-  const messageRefs = listResponse.data.messages || [];
-  if (messageRefs.length === 0) {
+  const refs = listResponse.data.messages || [];
+  if (refs.length === 0) {
     return {
       count: 0,
       nextPageToken: listResponse.data.nextPageToken || null,
@@ -76,24 +102,8 @@ export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
   }
 
   const emails = [];
-  for (const messageRef of messageRefs) {
-    const message = await gmail.users.messages.get({
-      userId: 'me',
-      id: messageRef.id,
-      format: 'metadata',
-      metadataHeaders: ['Subject', 'From', 'Date'],
-    });
-
-    const headers = message.data.payload?.headers || [];
-    const headerValue = (name) =>
-      headers.find((item) => item.name?.toLowerCase() === name.toLowerCase())?.value || '';
-
-    emails.push({
-      subject: headerValue('Subject'),
-      from: headerValue('From'),
-      date: headerValue('Date'),
-      snippet: message.data.snippet || '',
-    });
+  for (const ref of refs) {
+    emails.push(await getMessageMetadata(gmail, ref.id));
   }
 
   return {
@@ -101,4 +111,85 @@ export async function fetchEmails({ maxResults = 10, pageToken } = {}) {
     nextPageToken: listResponse.data.nextPageToken || null,
     emails,
   };
+}
+
+export async function fetchResultCandidateEmails({ maxResults = 25 } = {}) {
+  const gmail = getAuthenticatedGmailClient();
+  const listResponse = await gmail.users.messages.list({
+    userId: 'me',
+    maxResults: Number(maxResults) || 25,
+    includeSpamTrash: true,
+  });
+
+  const refs = listResponse.data.messages || [];
+  const emails = [];
+  for (const ref of refs) {
+    emails.push(await getMessageMetadata(gmail, ref.id));
+  }
+  return emails;
+}
+
+function collectParts(part, output = []) {
+  if (!part) {
+    return output;
+  }
+
+  output.push(part);
+  for (const child of part.parts || []) {
+    collectParts(child, output);
+  }
+  return output;
+}
+
+function decodeBase64Url(data) {
+  if (!data) {
+    return Buffer.alloc(0);
+  }
+  const normalized = data.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(normalized, 'base64');
+}
+
+export async function extractPdfAttachments(gmail, messageId) {
+  console.log('[email] Fetching attachments...');
+
+  const message = await gmail.users.messages.get({
+    userId: 'me',
+    id: messageId,
+    format: 'full',
+  });
+
+  const parts = collectParts(message.data.payload, []);
+  const pdfParts = parts.filter((part) => (part.filename || '').toLowerCase().endsWith('.pdf'));
+
+  const files = [];
+  for (const part of pdfParts) {
+    const attachmentId = part.body?.attachmentId;
+    const filename = part.filename || `attachment-${messageId}.pdf`;
+
+    let buffer;
+    if (attachmentId) {
+      const attachment = await gmail.users.messages.attachments.get({
+        userId: 'me',
+        messageId,
+        id: attachmentId,
+      });
+      buffer = decodeBase64Url(attachment.data.data || '');
+    } else {
+      buffer = decodeBase64Url(part.body?.data || '');
+    }
+
+    if (buffer.length > 0) {
+      console.log('[email] PDF found');
+      files.push({ filename, buffer });
+    }
+  }
+
+  return files;
+}
+
+export async function fetchAndExtractPdfAttachments(messageId) {
+  const gmail = getAuthenticatedGmailClient();
+  const email = await getMessageMetadata(gmail, messageId);
+  const pdfAttachments = await extractPdfAttachments(gmail, messageId);
+  return { email, pdfAttachments };
 }

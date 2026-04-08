@@ -181,6 +181,38 @@ export async function fetchGmailEmails({ maxResults = 10, pageToken } = {}) {
   return payload;
 }
 
+export async function fetchResultEmails({ maxResults = 30 } = {}) {
+  const params = new URLSearchParams();
+  params.set('maxResults', String(maxResults));
+
+  const response = await fetch(`${gmailOAuthBaseUrl}/emails/results?${params.toString()}`);
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+
+  if (!response.ok) {
+    const message = typeof payload === 'string' ? payload : payload.detail || payload.error || 'Failed to fetch result emails';
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
+export async function analyzeResultEmail(messageId) {
+  const response = await fetch(`${gmailOAuthBaseUrl}/emails/analyze/${encodeURIComponent(messageId)}`, {
+    method: 'POST',
+  });
+
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+
+  if (!response.ok) {
+    const message = typeof payload === 'string' ? payload : payload.detail || payload.error || 'Failed to analyze email';
+    throw new Error(message);
+  }
+
+  return payload;
+}
+
 export function sendChatQuery(query) {
   return request('/chat/query', {
     method: 'POST',

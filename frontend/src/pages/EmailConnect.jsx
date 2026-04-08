@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { beginGmailOAuth, fetchGmailEmails, getGmailConnectionStatus } from '../lib/api';
+import {
+  analyzeResultEmail,
+  beginGmailOAuth,
+  fetchGmailEmails,
+  fetchResultEmails,
+  getGmailConnectionStatus,
+} from '../lib/api';
 import { SectionCard } from '../components/SectionCard';
 
 export function EmailConnect() {
@@ -9,6 +15,9 @@ export function EmailConnect() {
   const [connectionState, setConnectionState] = useState('idle');
   const [emails, setEmails] = useState([]);
   const [nextPageToken, setNextPageToken] = useState(null);
+  const [resultEmails, setResultEmails] = useState([]);
+  const [checkingResults, setCheckingResults] = useState(false);
+  const [analyzingId, setAnalyzingId] = useState('');
   const [error, setError] = useState('');
   const [maxResults, setMaxResults] = useState(10);
   const queryParams = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -69,6 +78,40 @@ export function EmailConnect() {
     }
   }
 
+  async function checkEmailsForResults() {
+    setCheckingResults(true);
+    setError('');
+    try {
+      const payload = await fetchResultEmails({ maxResults });
+      setResultEmails(payload.emails || []);
+      setStatusMessage(
+        (payload.count || 0) > 0
+          ? `Result emails found: ${payload.count}`
+          : (payload.message || 'No result emails found.'),
+      );
+    } catch (err) {
+      setError(err.message || 'Failed to check result emails');
+      setStatusMessage('Failed to check emails for results.');
+    } finally {
+      setCheckingResults(false);
+    }
+  }
+
+  async function analyzeEmail(messageId) {
+    setAnalyzingId(messageId);
+    setError('');
+    try {
+      const payload = await analyzeResultEmail(messageId);
+      const count = payload.analyses?.length || 0;
+      setStatusMessage(count > 0 ? `Analyzed ${count} PDF attachment(s) from selected email.` : 'Analysis completed.');
+    } catch (err) {
+      setError(err.message || 'Failed to analyze selected email');
+      setStatusMessage('Email analysis failed.');
+    } finally {
+      setAnalyzingId('');
+    }
+  }
+
   return (
     <SectionCard title="Email integration" description="Connect Gmail securely with OAuth2 and fetch inbox emails directly.">
       <div className="grid gap-4 md:grid-cols-3">
@@ -99,6 +142,16 @@ export function EmailConnect() {
           className="rounded-full border border-white/20 px-5 py-3 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {fetching ? 'Fetching...' : 'Fetch Emails'}
+        </button>
+      </div>
+      <div className="mt-4">
+        <button
+          type="button"
+          onClick={checkEmailsForResults}
+          disabled={checkingResults || fetching}
+          className="rounded-full bg-sun-400 px-5 py-3 font-medium text-slate-950 transition hover:bg-sun-300 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {checkingResults ? 'Checking...' : 'Check Emails for Results'}
         </button>
       </div>
       {statusMessage ? <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-3 text-sm text-slate-300">{statusMessage}</div> : null}
@@ -136,6 +189,29 @@ export function EmailConnect() {
                 <div className="text-xs text-slate-300">From: {emailItem.from || '-'}</div>
                 <div className="text-xs text-slate-300">Date: {emailItem.date || '-'}</div>
                 <div className="mt-2 text-xs text-slate-300">Snippet: {emailItem.snippet || '-'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {resultEmails.length > 0 ? (
+        <div className="mt-4 space-y-2 rounded-2xl border border-sun-400/30 bg-sun-400/10 p-4 text-sm text-slate-100">
+          <div className="text-xs uppercase tracking-[0.3em] text-sun-300">Result email candidates</div>
+          <div className="max-h-80 overflow-auto space-y-2">
+            {resultEmails.map((emailItem) => (
+              <div key={emailItem.messageId} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <div className="font-medium text-white">{emailItem.subject || '-'}</div>
+                <div className="text-xs text-slate-300">From: {emailItem.from || '-'}</div>
+                <div className="text-xs text-slate-300">Date: {emailItem.date || '-'}</div>
+                <div className="mt-1 text-xs text-sun-300">Result Email Found</div>
+                <button
+                  type="button"
+                  onClick={() => analyzeEmail(emailItem.messageId)}
+                  disabled={Boolean(analyzingId)}
+                  className="mt-3 rounded-full border border-sun-300/60 px-3 py-1 text-xs text-sun-200 hover:bg-sun-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {analyzingId === emailItem.messageId ? 'Analyzing...' : 'Analyze'}
+                </button>
               </div>
             ))}
           </div>
