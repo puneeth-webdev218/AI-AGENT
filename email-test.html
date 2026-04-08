@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Connection Test</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 50px auto; background: #1a1a1a; color: #fff; }
+        .container { background: #2a2a2a; padding: 20px; border-radius: 8px; border: 1px solid #444; }
+        input { display: block; width: 100%; padding: 8px; margin: 8px 0; background: #333; color: #fff; border: 1px solid #555; border-radius: 4px; }
+        button { background: #4CAF50; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold; }
+        button:hover { background: #45a049; }
+        .log { background: #111; padding: 15px; border-radius: 4px; margin-top: 20px; max-height: 400px; overflow-auto; white-space: pre-wrap; font-family: monospace; font-size: 12px; border: 1px solid #555; }
+        .success { color: #4CAF50; }
+        .error { color: #ff6b6b; }
+        .info { color: #64b5f6; }
+        h2 { margin-top: 0; color: #64b5f6; }
+        label { display: block; margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Email Connection Direct Test</h1>
+        
+        <form id="testForm">
+            <label>IMAP Host</label>
+            <input type="text" id="host" value="imap.gmail.com">
+            
+            <label>Port</label>
+            <input type="number" id="port" value="993">
+            
+            <label>Username</label>
+            <input type="text" id="username" placeholder="your@email.com" value="test@test.com">
+            
+            <label>Password</label>
+            <input type="password" id="password" placeholder="app password" value="testpass">
+            
+            <label>Folder</label>
+            <input type="text" id="folder" value="INBOX">
+            
+            <label>
+                <input type="checkbox" id="use_ssl" checked>
+                Use SSL
+            </label>
+            
+            <button type="submit">Test Connection</button>
+        </form>
+        
+        <div class="log" id="output">Ready to test...</div>
+    </div>
+
+    <script>
+        const output = document.getElementById('output');
+        
+        function log(msg, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const color = type === 'success' ? 'success' : type === 'error' ? 'error' : 'info';
+            output.innerHTML += `<span class="${color}">[${timestamp}] ${msg}</span>\n`;
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        document.getElementById('testForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            output.innerHTML = '';
+            
+            const payload = {
+                host: document.getElementById('host').value,
+                port: Number(document.getElementById('port').value),
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+                folder: document.getElementById('folder').value,
+                use_ssl: document.getElementById('use_ssl').checked,
+            };
+            
+            log('═══════════════════════════════════════════════', 'info');
+            log('🧪 STARTING EMAIL CONNECTION TEST', 'info');
+            log('═══════════════════════════════════════════════', 'info');
+            log(`📤 Target: http://127.0.0.1:8000/api/v1/email/connect`, 'info');
+            log(`📋 Payload: ${JSON.stringify(payload, null, 2)}`, 'info');
+            log('', 'info');
+            
+            const startTime = Date.now();
+            try {
+                log('🌐 Sending fetch request...', 'info');
+                
+                const response = await fetch('http://127.0.0.1:8000/api/v1/email/connect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                
+                const elapsed = Date.now() - startTime;
+                log(`✅ Response received after ${elapsed}ms`, 'success');
+                log(`📊 Status: ${response.status} ${response.statusText}`, 'success');
+                
+                const data = await response.json();
+                
+                log('', 'info');
+                log('═══════════════════════════════════════════════', 'info');
+                log('✅ SERVER RESPONSE:', 'success');
+                log('═══════════════════════════════════════════════', 'info');
+                log(JSON.stringify(data, null, 2), 'success');
+                
+                if (data.status === 'success') {
+                    log(`✅ SUCCESS! Found ${data.email_count} emails`, 'success');
+                } else {
+                    log(`❌ FAILED: ${data.error}`, 'error');
+                }
+                
+            } catch (err) {
+                const elapsed = Date.now() - startTime;
+                log('', 'info');
+                log('═══════════════════════════════════════════════', 'info');
+                log(`❌ ERROR (after ${elapsed}ms)`, 'error');
+                log('═══════════════════════════════════════════════', 'info');
+                log(`Error: ${err.message}`, 'error');
+                log(`Name: ${err.name}`, 'error');
+                
+                if (err.message.includes('Failed to fetch')) {
+                    log('💡 Hint: Backend might not be running on http://127.0.0.1:8000', 'error');
+                }
+            }
+        });
+    </script>
+</body>
+</html>
