@@ -6,22 +6,27 @@ import { StatCard } from '../components/StatCard';
 export function Dashboard() {
   const [documents, setDocuments] = useState([]);
   const [results, setResults] = useState([]);
-  const [health, setHealth] = useState('checking');
+  const [health, setHealth] = useState('ok');
   const [error, setError] = useState('');
 
   useEffect(() => {
     let mounted = true;
 
-    healthCheck()
-      .then((healthPayload) => {
-        if (!mounted) return;
-        setHealth(healthPayload.status || 'ok');
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setHealth('down');
-        setError(err.message);
-      });
+    const runHealthCheck = () => {
+      healthCheck()
+        .then((healthPayload) => {
+          if (!mounted) return;
+          setHealth((healthPayload.status || 'ok').toLowerCase());
+        })
+        .catch((err) => {
+          if (!mounted) return;
+          setHealth('down');
+          setError(err.message);
+        });
+    };
+
+    runHealthCheck();
+    const healthInterval = setInterval(runHealthCheck, 15000);
 
     listDocuments()
       .then((documentPayload) => {
@@ -45,13 +50,16 @@ export function Dashboard() {
 
     return () => {
       mounted = false;
+      clearInterval(healthInterval);
     };
   }, []);
+
+  const healthLabel = health === 'ok' ? 'OK' : health;
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-3">
-        <StatCard label="System status" value={health} hint="Backend health check and database connectivity." />
+        <StatCard label="System status" value={healthLabel} hint="Backend health check and database connectivity." />
         <StatCard label="Documents" value={documents.length} hint="Uploaded or email-synced files tracked in the database." accent="sun" />
         <StatCard label="Results" value={results.length} hint="Structured extraction rows ready for analysis." accent="ember" />
       </div>

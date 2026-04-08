@@ -1,4 +1,6 @@
+import asyncio
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select, update, func
 from sqlalchemy.orm import Session
 
@@ -31,7 +33,10 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
     db.add(document)
     db.flush()
     try:
-        extracted_text, extracted_fields, processed_type, extracted_rows = process_document(saved_path)
+        extracted_text, extracted_fields, processed_type, extracted_rows = await asyncio.wait_for(
+            run_in_threadpool(process_document, saved_path),
+            timeout=180,
+        )
         print('EXTRACTED DATA:', asdict(extracted_fields))
         validation = validate_extracted_fields(extracted_fields)
         print('VALIDATED DATA:', {'status': validation.status, 'is_valid': validation.is_valid, 'messages': validation.messages})
@@ -100,6 +105,12 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
         db.add(document)
         db.commit()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except asyncio.TimeoutError as exc:
+        document.status = 'failed'
+        document.error_message = 'Document processing timed out. Please try a smaller or cleaner file.'
+        db.add(document)
+        db.commit()
+        raise HTTPException(status_code=408, detail=document.error_message) from exc
     except StorageError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
