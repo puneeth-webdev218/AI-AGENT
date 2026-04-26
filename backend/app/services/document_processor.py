@@ -6,7 +6,7 @@ import pdfplumber
 import pytesseract
 from PIL import Image, ImageFilter
 
-from app.services.extraction import extract_from_excel, extract_from_text, extract_rows_from_excel, extract_rows_from_text
+from app.services.extraction import extract_from_text, extract_rows_from_text, parse_excel_workbook
 from app.services.validation import ExtractedFields
 
 logger = logging.getLogger(__name__)
@@ -89,8 +89,9 @@ def process_image(file_path: Path) -> tuple[str, ExtractedFields, str, list[Extr
 
 def process_excel(file_path: Path) -> tuple[str, ExtractedFields, str, list[ExtractedFields]]:
     try:
-        text, extracted_fields = extract_from_excel(str(file_path))
-        extracted_rows = extract_rows_from_excel(str(file_path))
+        extracted_rows, text_rows = parse_excel_workbook(str(file_path))
+        text = '\n'.join(text_rows)
+        extracted_fields = extracted_rows[0] if extracted_rows else ExtractedFields()
     except Exception as exc:
         raise DocumentProcessingError(f'Failed to parse Excel file: {exc}') from exc
     if not text.strip():

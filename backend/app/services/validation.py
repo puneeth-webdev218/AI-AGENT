@@ -19,7 +19,10 @@ class ExtractedFields:
     student_name: str | None = None
     usn: str | None = None
     subject: str | None = None
+    subject_code: str | None = None
+    subject_name: str | None = None
     grade: str | None = None
+    grade_points: float | None = None
     sgpa: float | None = None
     source_text: str | None = None
 
@@ -42,7 +45,10 @@ def validate_extracted_fields(fields: ExtractedFields) -> ValidationResult:
         fields.student_name,
         fields.usn,
         fields.subject,
+        fields.subject_code,
+        fields.subject_name,
         fields.grade,
+        fields.grade_points is not None,
         fields.sgpa is not None,
     ])
     if not has_any:
@@ -54,12 +60,18 @@ def validate_extracted_fields(fields: ExtractedFields) -> ValidationResult:
         core_errors.append(f'Invalid SGPA range: {fields.sgpa}')
     if fields.grade and not GRADE_PATTERN.match(fields.grade):
         messages.append(f'Invalid grade format: {fields.grade}')
+    if fields.grade_points is not None and fields.grade_points < 0:
+        core_errors.append(f'Invalid grade points value: {fields.grade_points}')
     if fields.student_name and len(fields.student_name) < 2:
         core_errors.append('Student name is too short.')
     if fields.subject and len(fields.subject) < 2:
         messages.append('Subject is too short.')
+    if fields.subject_code and len(fields.subject_code) < 2:
+        messages.append('Subject code is too short.')
+    if fields.subject_name and len(fields.subject_name) < 2:
+        messages.append('Subject name is too short.')
 
-    has_core_fields = bool(fields.student_name and fields.usn and fields.sgpa is not None)
+    has_core_fields = bool(fields.student_name and fields.usn and (fields.sgpa is not None or fields.grade_points is not None or fields.subject or fields.subject_code or fields.subject_name))
     all_messages = core_errors + messages
 
     if core_errors:
@@ -77,7 +89,10 @@ def is_row_acceptable(fields: ExtractedFields) -> bool:
             bool(fields.student_name),
             bool(fields.usn),
             bool(fields.subject),
+            bool(fields.subject_code),
+            bool(fields.subject_name),
             bool(fields.grade),
+            fields.grade_points is not None,
             fields.sgpa is not None,
         ]
     )
@@ -85,6 +100,6 @@ def is_row_acceptable(fields: ExtractedFields) -> bool:
     # Relaxed acceptance: either enough fields (>=3) or strong identity pair.
     if present_count >= 3:
         return True
-    if fields.usn and (fields.student_name or fields.sgpa is not None):
+    if fields.usn and (fields.student_name or fields.sgpa is not None or fields.grade_points is not None):
         return True
     return False

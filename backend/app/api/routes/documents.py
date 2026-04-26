@@ -66,15 +66,18 @@ async def upload_document(file: UploadFile = File(...), db: Session = Depends(ge
                     student_id=student.id if student else None,
                     student_name=row.student_name,
                     usn=row.usn,
-                    subject=row.subject,
+                    subject=row.subject or row.subject_name,
+                    subject_code=row.subject_code,
+                    subject_name=row.subject_name or row.subject,
                     grade=row.grade,
+                    grade_points=row.grade_points,
                     sgpa=row.sgpa,
                     raw_text=extracted_text,
                     validation_status='validated' if row_validation.is_valid else row_validation.status,
                     validation_message='; '.join(row_validation.messages) if row_validation.messages else None,
                 )
                 db.add(result)
-                print('INSERTING:', {'name': row.student_name, 'usn': row.usn, 'subject': row.subject, 'grade': row.grade, 'sgpa': row.sgpa})
+                print('INSERTING:', {'name': row.student_name, 'usn': row.usn, 'subject_code': row.subject_code, 'subject_name': row.subject_name or row.subject, 'grade': row.grade, 'grade_points': row.grade_points, 'sgpa': row.sgpa})
                 inserted += 1
             except Exception:
                 failed_rows += 1

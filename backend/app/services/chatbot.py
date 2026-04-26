@@ -28,7 +28,7 @@ ANSWER_PROMPT = (
 SCHEMA_CONTEXT = (
     'Database schema:\n'
     'students(id, usn, name, created_at, updated_at)\n'
-    'results(id, document_id, student_id, student_name, usn, subject, grade, sgpa, raw_text, validation_status, validation_message, created_at, updated_at)\n'
+    'results(id, document_id, student_id, student_name, usn, subject, subject_code, subject_name, grade, grade_points, sgpa, raw_text, validation_status, validation_message, created_at, updated_at)\n'
     'documents(id, filename, original_name, content_type, file_type, file_path, extracted_text, status, error_message, source_type, source_message_id, created_at, updated_at)\n'
     'email_logs(id, message_id, subject, sender, received_at, status, error_message, created_at)\n'
 )
@@ -178,7 +178,10 @@ def infer_requested_fields(query_lower: str, rows: list[dict]) -> list[str]:
         'name': ['name', 'names', 'student name', 'student names'],
         'student_name': ['student name', 'student names', 'name', 'names'],
         'subject': ['subject', 'subjects'],
+        'subject_code': ['subject code', 'subject codes', 'code', 'codes'],
+        'subject_name': ['subject name', 'subject names'],
         'grade': ['grade', 'grades'],
+        'grade_points': ['grade points', 'points', 'gp'],
         'sgpa': ['sgpa', 'cgpa', 'gpa'],
         'validation_status': ['validation status', 'status'],
         'validation_message': ['validation message', 'message'],

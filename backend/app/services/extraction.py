@@ -67,6 +67,15 @@ class ExcelProcessingStats:
     skipped_rows: int = 0
 
 
+@dataclass
+class ComplexSubjectBlock:
+    start_col: int
+    grade_col: int
+    grade_points_col: int
+    subject_code: str | None = None
+    subject_name: str | None = None
+
+
 def extract_from_text(text: str) -> ExtractedFields:
     lines = [normalize_text(line) for line in text.splitlines()]
     lines = [line for line in lines if line]
@@ -121,18 +130,7 @@ def extract_rows_from_text(text: str) -> list[ExtractedFields]:
 
 
 def extract_from_excel(file_path: str) -> tuple[str, ExtractedFields]:
-    extracted_rows = extract_rows_from_excel(file_path)
-    text_rows: list[str] = []
-    sheets = pd.read_excel(file_path, sheet_name=None)
-    for sheet_name, frame in sheets.items():
-        normalized = sanitize_excel_frame(frame)
-        if normalized.empty:
-            continue
-        for _, row in normalized.iterrows():
-            text_line = ' | '.join(str(value) for value in row.tolist() if str(value).strip())
-            if text_line:
-                text_rows.append(f'[{sheet_name}] {text_line}')
-
+    extracted_rows, text_rows = parse_excel_workbook(file_path)
     extracted = extracted_rows[0] if extracted_rows else ExtractedFields()
     joined_text = '\n'.join(text_rows)
     if extracted.usn is None:
@@ -143,71 +141,278 @@ def extract_from_excel(file_path: str) -> tuple[str, ExtractedFields]:
 
 
 def extract_rows_from_excel(file_path: str) -> list[ExtractedFields]:
-    sheets = pd.read_excel(file_path, sheet_name=None)
+    rows, _ = parse_excel_workbook(file_path)
+    return rows
+
+
+def parse_excel_workbook(file_path: str) -> tuple[list[ExtractedFields], list[str]]:
+    raw_sheets = pd.read_excel(file_path, sheet_name=None, header=None, dtype=object)
+    default_sheets = pd.read_excel(file_path, sheet_name=None)
+
     rows: list[ExtractedFields] = []
+    text_rows: list[str] = []
     stats = ExcelProcessingStats()
+    detected_formats: list[str] = []
+
+    for sheet_name, raw_frame in raw_sheets.items():
+        format_name = detect_excel_format(raw_frame)
+        detected_formats.append(format_name)
+        print(f'Detected format ({sheet_name}): {format_name}')
+
+        if format_name == 'complex':
+            sheet_rows, sheet_text_rows = parse_complex_excel_sheet(raw_frame, sheet_name)
+        else:
+            frame = default_sheets.get(sheet_name)
+            sheet_rows, sheet_text_rows = parse_simple_excel_sheet(frame, sheet_name, stats)
+
+        rows.extend(sheet_rows)
+        text_rows.extend(sheet_text_rows)
+
+    deduped = dedupe_rows(rows)
+    total_students = len({(row.usn or '').upper() for row in deduped if row.usn})
+    total_subjects = len(deduped)
+    print('Detected workbook formats:', detected_formats)
+    print('Total students processed:', total_students)
+    print('Total subjects extracted:', total_subjects)
+    print('Total DB inserts:', len(deduped))
+    print('FINAL EXTRACTED DATA:', [row.__dict__ for row in deduped])
+    return deduped, text_rows
+
+
+def detect_excel_format(raw_frame: pd.DataFrame) -> str:
+    if raw_frame is None or raw_frame.empty:
+        return 'simple'
+    data_start_row = find_complex_data_start_row(raw_frame)
+    if data_start_row is None or data_start_row < 2:
+        return 'simple'
+    header_rows = raw_frame.iloc[:data_start_row]
+    subject_blocks = detect_complex_subject_blocks(header_rows)
+    return 'complex' if subject_blocks else 'simple'
+
+
+def parse_simple_excel_sheet(frame: pd.DataFrame | None, sheet_name: str, stats: ExcelProcessingStats) -> tuple[list[ExtractedFields], list[str]]:
+    if frame is None or frame.empty:
+        return [], []
+
+    normalized_frame = sanitize_excel_frame(frame)
+    if normalized_frame.empty:
+        return [], []
+
+    column_map = map_excel_columns(normalized_frame.columns)
+    if not column_map['name'] or not column_map['usn'] or not column_map['sgpa']:
+        ai_map = infer_columns_with_llm(normalized_frame, sheet_name)
+        for key in ('name', 'usn', 'subject', 'grade', 'sgpa'):
+            if not column_map[key] and ai_map.get(key):
+                column_map[key] = ai_map[key]
+
+    print(f'Detected columns ({sheet_name}): {list(normalized_frame.columns)}')
+    print(f'Mapped fields ({sheet_name}): {column_map}')
+
+    if not column_map['name'] or not column_map['usn'] or not column_map['sgpa']:
+        stats.skipped_rows += len(normalized_frame.index)
+        return [], []
+
+    normalized_frame[column_map['sgpa']] = pd.to_numeric(normalized_frame[column_map['sgpa']], errors='coerce')
+
+    rows: list[ExtractedFields] = []
+    text_rows: list[str] = []
     chunk_size = 1000
 
-    for sheet_name, frame in sheets.items():
-        normalized_frame = sanitize_excel_frame(frame)
-        if normalized_frame.empty:
-            continue
+    for start in range(0, len(normalized_frame.index), chunk_size):
+        chunk = normalized_frame.iloc[start:start + chunk_size]
+        for _, row in chunk.iterrows():
+            stats.total_rows += 1
+            try:
+                candidate = ExtractedFields(
+                    student_name=clean_candidate_text(read_excel_cell(row, column_map['name'])),
+                    usn=read_excel_cell(row, column_map['usn']).upper() or None,
+                    subject=clean_candidate_text(read_excel_cell(row, column_map['subject'])) if column_map['subject'] else None,
+                    grade=clean_candidate_text(read_excel_cell(row, column_map['grade'])) if column_map['grade'] else None,
+                    sgpa=safe_float(row[column_map['sgpa']]) if column_map['sgpa'] else None,
+                )
 
-        column_map = map_excel_columns(normalized_frame.columns)
-        if not column_map['name'] or not column_map['usn'] or not column_map['sgpa']:
-            ai_map = infer_columns_with_llm(normalized_frame, sheet_name)
-            for key in ('name', 'usn', 'subject', 'grade', 'sgpa'):
-                if not column_map[key] and ai_map.get(key):
-                    column_map[key] = ai_map[key]
-
-        print(f'Detected columns ({sheet_name}): {list(normalized_frame.columns)}')
-        print(f'Mapped fields ({sheet_name}): {column_map}')
-
-        if not column_map['name'] or not column_map['usn'] or not column_map['sgpa']:
-            # Missing critical columns on this sheet; count rows as skipped and continue.
-            stats.skipped_rows += len(normalized_frame.index)
-            continue
-
-        normalized_frame[column_map['sgpa']] = pd.to_numeric(normalized_frame[column_map['sgpa']], errors='coerce')
-
-        for start in range(0, len(normalized_frame.index), chunk_size):
-            chunk = normalized_frame.iloc[start:start + chunk_size]
-            for _, row in chunk.iterrows():
-                stats.total_rows += 1
-                try:
-                    candidate = ExtractedFields(
-                        student_name=clean_candidate_text(read_excel_cell(row, column_map['name'])),
-                        usn=read_excel_cell(row, column_map['usn']).upper() or None,
-                        subject=clean_candidate_text(read_excel_cell(row, column_map['subject'])) if column_map['subject'] else None,
-                        grade=clean_candidate_text(read_excel_cell(row, column_map['grade'])) if column_map['grade'] else None,
-                        sgpa=safe_float(row[column_map['sgpa']]) if column_map['sgpa'] else None,
-                    )
-
-                    if not candidate.student_name and not candidate.usn and candidate.sgpa is None:
-                        stats.skipped_rows += 1
-                        continue
-                    if candidate.usn and not is_likely_usn(candidate.usn):
-                        stats.failed_rows += 1
-                        continue
-                    if not is_row_acceptable(candidate):
-                        stats.failed_rows += 1
-                        continue
-
-                    rows.append(candidate)
-                    stats.inserted_candidates += 1
-                except Exception:
+                if not candidate.student_name and not candidate.usn and candidate.sgpa is None:
+                    stats.skipped_rows += 1
+                    continue
+                if candidate.usn and not is_likely_usn(candidate.usn):
+                    stats.failed_rows += 1
+                    continue
+                if not is_row_acceptable(candidate):
                     stats.failed_rows += 1
                     continue
 
+                rows.append(candidate)
+                text_rows.append(f'[{sheet_name}] {candidate.student_name or ""} | {candidate.usn or ""} | {candidate.subject or ""} | {candidate.grade or ""} | {candidate.sgpa if candidate.sgpa is not None else ""}')
+                stats.inserted_candidates += 1
+            except Exception:
+                stats.failed_rows += 1
+                continue
+
     deduped = dedupe_rows(rows)
-    # Adjust inserted count post de-duplication for accurate logging.
     stats.inserted_candidates = len(deduped)
     print('Total rows:', stats.total_rows)
     print('Inserted:', stats.inserted_candidates)
     print('Failed:', stats.failed_rows)
     print('Skipped:', stats.skipped_rows)
-    print('FINAL EXTRACTED DATA:', [row.__dict__ for row in deduped])
-    return deduped
+    return deduped, text_rows
+
+
+def parse_complex_excel_sheet(raw_frame: pd.DataFrame, sheet_name: str) -> tuple[list[ExtractedFields], list[str]]:
+    data_start_row = find_complex_data_start_row(raw_frame)
+    if data_start_row is None:
+        return [], []
+
+    header_rows = raw_frame.iloc[:data_start_row]
+    subject_blocks = detect_complex_subject_blocks(header_rows)
+    if not subject_blocks:
+        return [], []
+
+    rows: list[ExtractedFields] = []
+    text_rows: list[str] = []
+    total_rows = 0
+
+    print(f'Complex Excel header rows ({sheet_name}): {data_start_row}')
+    print(f'Complex subject blocks ({sheet_name}): {[block.__dict__ for block in subject_blocks]}')
+
+    for row_index in range(data_start_row, len(raw_frame.index)):
+        row = raw_frame.iloc[row_index]
+        try:
+            total_rows += 1
+            student_name = clean_candidate_text(excel_cell_text(row, 2))
+            usn = excel_cell_text(row, 1).upper() or None
+            if usn and not is_likely_usn(usn):
+                continue
+            if not usn and not student_name:
+                continue
+
+            for block in subject_blocks:
+                grade = clean_candidate_text(excel_cell_text(row, block.grade_col))
+                grade_points = safe_float(row.iloc[block.grade_points_col]) if block.grade_points_col < len(row) else None
+
+                if grade is None and grade_points is None:
+                    continue
+
+                subject_name = clean_candidate_text(block.subject_name)
+                subject_code = clean_candidate_text(block.subject_code)
+                candidate = ExtractedFields(
+                    student_name=student_name,
+                    usn=usn,
+                    subject=subject_name or subject_code,
+                    subject_code=subject_code,
+                    subject_name=subject_name,
+                    grade=grade,
+                    grade_points=grade_points,
+                )
+
+                if not is_row_acceptable(candidate):
+                    continue
+
+                rows.append(candidate)
+                text_rows.append(
+                    f'[{sheet_name}] {student_name or ""} | {usn or ""} | {subject_code or ""} | {subject_name or ""} | {grade or ""} | {"" if grade_points is None else grade_points}'
+                )
+        except Exception as exc:
+            print(f'Complex Excel row skipped ({sheet_name} row {row_index + 1}): {exc}')
+            continue
+
+    deduped = dedupe_rows(rows)
+    print(f'Complex Excel rows ({sheet_name}): {total_rows}')
+    print(f'Complex Excel extracted rows ({sheet_name}): {len(deduped)}')
+    return deduped, text_rows
+
+
+def find_complex_data_start_row(raw_frame: pd.DataFrame) -> int | None:
+    for row_index in range(len(raw_frame.index)):
+        usn_value = excel_cell_text(raw_frame.iloc[row_index], 1)
+        name_value = excel_cell_text(raw_frame.iloc[row_index], 2)
+        if usn_value and is_likely_usn(usn_value) and name_value:
+            return row_index
+    return None
+
+
+def detect_complex_subject_blocks(header_rows: pd.DataFrame) -> list[ComplexSubjectBlock]:
+    if header_rows.empty:
+        return []
+
+    bottom_row = header_rows.iloc[-1]
+    blocks: list[ComplexSubjectBlock] = []
+    column_count = len(bottom_row.index)
+
+    for column_index in range(3, column_count - 1):
+        grade_label = normalize_text(excel_cell_text(bottom_row, column_index))
+        points_label = normalize_text(excel_cell_text(bottom_row, column_index + 1))
+        if not grade_label or not points_label:
+            continue
+        if grade_label.upper() not in {'GR', 'GRADE'}:
+            continue
+        if points_label.upper() not in {'GP', 'GRADE POINTS', 'POINTS'}:
+            continue
+
+        subject_code, subject_name = infer_subject_metadata(header_rows, column_index, column_index + 1)
+        blocks.append(
+            ComplexSubjectBlock(
+                start_col=column_index,
+                grade_col=column_index,
+                grade_points_col=column_index + 1,
+                subject_code=subject_code,
+                subject_name=subject_name,
+            )
+        )
+
+    return blocks
+
+
+def infer_subject_metadata(header_rows: pd.DataFrame, left_col: int, right_col: int) -> tuple[str | None, str | None]:
+    candidates: list[str] = []
+    for row_index in range(len(header_rows.index)):
+        for column_index in (left_col, right_col):
+            if column_index >= len(header_rows.columns):
+                continue
+            value = clean_candidate_text(excel_cell_text(header_rows.iloc[row_index], column_index))
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in {'gr', 'gp'}:
+                continue
+            if re.fullmatch(r'\d+(?::\d+)+', value):
+                continue
+            if value not in candidates:
+                candidates.append(value)
+
+    subject_code = None
+    subject_name = None
+    for value in candidates:
+        if is_subject_code_candidate(value):
+            subject_code = value
+            break
+
+    if subject_code:
+        for value in candidates:
+            if value == subject_code:
+                continue
+            if not is_subject_code_candidate(value):
+                subject_name = value
+                break
+    elif candidates:
+        subject_name = candidates[0]
+
+    return subject_code, subject_name
+
+
+def is_subject_code_candidate(value: str) -> bool:
+    normalized = value.strip().upper()
+    if len(normalized) < 3 or len(normalized) > 12:
+        return False
+    return bool(re.fullmatch(r'[A-Z]{1,6}\d+[A-Z0-9()\-/]*', normalized))
+
+
+def excel_cell_text(row: pd.Series, column_index: int) -> str:
+    if column_index >= len(row.index):
+        return ''
+    value = row.iloc[column_index]
+    if pd.isna(value):
+        return ''
+    return str(value).strip()
 
 
 def infer_columns_with_llm(frame: pd.DataFrame, sheet_name: str) -> dict[str, str]:
@@ -540,15 +745,19 @@ def parse_row_line(line: str) -> ExtractedFields | None:
 
 def dedupe_rows(rows: list[ExtractedFields]) -> list[ExtractedFields]:
     deduped: list[ExtractedFields] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str, str, str]] = set()
     for row in rows:
         if not is_row_acceptable(row):
             continue
         key = (
             (row.usn or '').upper(),
             (row.student_name or '').lower(),
+            (row.subject_code or row.subject or '').lower(),
+            (row.subject_name or '').lower(),
             (row.subject or '').lower(),
+            '' if row.grade is None else row.grade.lower(),
             '' if row.sgpa is None else f'{row.sgpa:.2f}',
+            '' if row.grade_points is None else f'{row.grade_points:.2f}',
         )
         if key in seen:
             continue
