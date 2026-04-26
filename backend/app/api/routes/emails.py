@@ -2,15 +2,15 @@ import logging
 from threading import Lock, Thread
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, get_db_session
 from app.models.email_log import EmailLog
-from app.schemas.email import EmailConnectRequest, EmailConnectResponse, EmailJobStatusResponse, EmailLogResponse, EmailSyncResponse, EmailItemResponse
-from app.services.email_service import EmailConnectionError, EmailSyncError, test_email_connection, fetch_and_store_emails, sync_email_documents, IMAPEmailClient
+from app.schemas.email import EmailConnectRequest, EmailConnectResponse, EmailJobStatusResponse, EmailLogResponse, EmailSyncResponse, EmailItemResponse, EmailProcessRequest, EmailProcessResponse
+from app.services.email_service import EmailConnectionError, EmailSyncError, test_email_connection, fetch_and_store_emails, sync_email_documents, IMAPEmailClient, process_selected_email
 
 router = APIRouter(prefix='/emails', tags=['emails'])
 alias_router = APIRouter(prefix='/email', tags=['emails'])
@@ -194,6 +194,38 @@ def sync_emails(request: EmailConnectRequest, db: Session = Depends(get_db_sessi
 @alias_router.post('/sync', response_model=EmailSyncResponse)
 def sync_emails_alias(request: EmailConnectRequest, db: Session = Depends(get_db_session)) -> EmailSyncResponse:
     return sync_emails(request, db)
+
+
+@alias_router.post('/process/{email_id}', response_model=EmailProcessResponse)
+def process_email_attachment(
+    email_id: str,
+    request: EmailProcessRequest | None = Body(default=None),
+    db: Session = Depends(get_db_session),
+) -> EmailProcessResponse:
+    host = request.host if request and request.host else settings.imap_host
+    port = request.port if request and request.port else settings.imap_port
+    username = request.username if request and request.username else settings.email_username
+    password = request.password if request and request.password else settings.email_password
+    folder = request.folder if request and request.folder else settings.email_folder
+    use_ssl = request.use_ssl if request and request.use_ssl is not None else True
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail='Email credentials missing. Provide username/password in request or backend .env.')
+
+    try:
+        with IMAPEmailClient(host, port, username, password, use_ssl) as client:
+            result = process_selected_email(
+                session=db,
+                client=client,
+                folder=folder,
+                selected_email_id=email_id,
+            )
+        return EmailProcessResponse(**result)
+    except EmailSyncError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception('Failed to process selected email attachment')
+        raise HTTPException(status_code=500, detail=f'Email attachment processing failed: {exc}') from exc
 
 
 @router.get('/jobs/{job_id}', response_model=EmailJobStatusResponse)

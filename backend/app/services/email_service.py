@@ -9,10 +9,12 @@ from email.message import Message
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.document import Document
 from app.models.email_log import EmailLog
 from app.models.result import Result
@@ -23,6 +25,9 @@ from app.services.storage import build_storage_path, validate_filename
 from app.services.validation import is_row_acceptable, validate_extracted_fields
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
+SUPPORTED_EMAIL_ATTACHMENT_EXTENSIONS = {'.pdf', '.xls', '.xlsx'}
+EMAIL_ATTACHMENT_DIR = Path('uploads/email_attachments')
 
 
 @dataclass
@@ -680,96 +685,19 @@ def sync_email_documents(session: Session, client: IMAPEmailClient, folder: str,
                 session.add(EmailLog(email_id=message_id, message_id=message_id, subject=subject, sender=sender, received_at=str(message.get('Date', '')), status='no_attachments', processed_flag=False))
                 session.commit()
                 continue
-            message_status = 'processed'
-            for attachment in attachments:
-                extension = Path(attachment.filename).suffix.lower()
-                try:
-                    validate_filename(attachment.filename)
-                except Exception as exc:
-                    logger.warning('Skipping unsupported email attachment %s: %s', attachment.filename, exc)
-                    errors += 1
-                    continue
-                saved_path = build_storage_path(attachment.filename)
-                saved_path.write_bytes(attachment.payload)
-                document = Document(
-                    filename=saved_path.name,
-                    original_name=attachment.filename,
-                    content_type=attachment.content_type,
-                    file_type=extension.lstrip('.') or 'unknown',
-                    file_path=str(saved_path),
-                    source_type='email',
-                    source_message_id=message_id,
-                    status='pending',
-                )
-                session.add(document)
-                session.flush()
-                try:
-                    text, extracted, processed_type, extracted_rows = process_document(saved_path)
-                    print('EXTRACTED DATA:', asdict(extracted))
-                    validation = validate_extracted_fields(extracted)
-                    print('VALIDATED DATA:', {'status': validation.status, 'is_valid': validation.is_valid, 'messages': validation.messages})
-                    print('INSERTING INTO DB:', asdict(extracted))
-
-                    session.execute(update(Document).values(is_latest=False))
-                    document.is_latest = True
-
-                    document.extracted_text = text
-                    document.file_type = processed_type
-                    all_rows = extracted_rows or [extracted]
-                    inserted = 0
-                    total_rows = len(all_rows)
-                    failed_rows = 0
-                    skipped_rows = 0
-                    for row in all_rows:
-                        try:
-                            row_validation = validate_extracted_fields(row)
-                            if not is_row_acceptable(row):
-                                skipped_rows += 1
-                                continue
-                            student = upsert_student(session, row.usn, row.student_name)
-                            result = Result(
-                                document_id=document.id,
-                                student_id=student.id if student else None,
-                                student_name=row.student_name,
-                                usn=row.usn,
-                                subject=row.subject or row.subject_name,
-                                subject_code=row.subject_code,
-                                subject_name=row.subject_name or row.subject,
-                                grade=row.grade,
-                                grade_points=row.grade_points,
-                                sgpa=row.sgpa,
-                                raw_text=text,
-                                validation_status='validated' if row_validation.is_valid else row_validation.status,
-                                validation_message='; '.join(row_validation.messages) if row_validation.messages else None,
-                            )
-                            session.add(result)
-                            print('INSERTING:', {'name': row.student_name, 'usn': row.usn, 'subject_code': row.subject_code, 'subject_name': row.subject_name or row.subject, 'grade': row.grade, 'grade_points': row.grade_points, 'sgpa': row.sgpa})
-                            inserted += 1
-                        except Exception:
-                            failed_rows += 1
-                            continue
-                    processed_ratio = (inserted / total_rows) if total_rows else 0.0
-                    if inserted == 0:
-                        document.status = 'failed'
-                    elif processed_ratio > 0.8:
-                        document.status = 'success'
-                    else:
-                        document.status = 'completed_with_errors'
-                    print('Total rows:', total_rows)
-                    print('Inserted:', inserted)
-                    print('Failed:', failed_rows)
-                    print('Skipped:', skipped_rows)
-                    document.error_message = '; '.join(validation.messages) if validation.messages else None
-                    processed_documents += 1
-                    students_rows = session.execute(select(Student.id, Student.name, Student.usn)).all()
-                    print('SELECT * FROM students:', [dict(row._mapping) for row in students_rows])
-                    print('DB INSERT SUCCESS')
-                except Exception as exc:
-                    document.status = 'failed'
-                    document.error_message = str(exc)
-                    errors += 1
-                    message_status = 'failed'
-            session.add(EmailLog(email_id=message_id, message_id=message_id, subject=subject, sender=sender, received_at=str(message.get('Date', '')), status=message_status, processed_flag=message_status == 'processed'))
+            processing = process_email_message_attachments(
+                session=session,
+                message=message,
+                source_email_id=message_data.get('raw_id', message_id),
+                source_message_id=message_id,
+                source_type='email',
+            )
+            processed_documents += processing['processed_documents']
+            errors += processing['errors']
+            status = 'processed' if processing['processed_documents'] > 0 and processing['errors'] == 0 else 'failed'
+            if processing['status'] == 'no_attachments':
+                status = 'no_attachments'
+            session.add(EmailLog(email_id=message_id, message_id=message_id, subject=subject, sender=sender, received_at=str(message.get('Date', '')), status=status, processed_flag=status == 'processed', error_message=processing.get('error_message')))
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -785,3 +713,229 @@ def sync_email_documents(session: Session, client: IMAPEmailClient, folder: str,
         'fallback_used': fallback_used,
         'message': 'Email sync completed' if processed_documents or skipped_duplicates or errors else 'No processable emails were found',
     }
+
+
+def fetch_message_by_email_identifier(client: IMAPEmailClient, folder: str, email_id: str | None, message_id: str | None) -> Message | None:
+    if client.connection is None:
+        raise EmailSyncError('IMAP connection is not established.')
+
+    client.select_folder(folder)
+    status, data = client.connection.search(None, 'ALL')
+    if status != 'OK':
+        raise EmailSyncError('Unable to search email folder.')
+
+    raw_ids = data[0].split() if data and data[0] else []
+    for raw_id in reversed(raw_ids):
+        raw_id_text = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
+        status, fetched = client.connection.fetch(raw_id, '(RFC822)')
+        if status != 'OK' or not fetched or not fetched[0]:
+            continue
+        message = email.message_from_bytes(fetched[0][1])
+        normalized_message_id = normalize_message_id(message.get('Message-ID'))
+
+        if email_id and raw_id_text == str(email_id):
+            return message
+        if message_id and normalized_message_id and normalized_message_id == normalize_message_id(message_id):
+            return message
+
+    return None
+
+
+def process_selected_email(session: Session, client: IMAPEmailClient, folder: str, selected_email_id: str) -> dict:
+    print(f'Processing email ID: {selected_email_id}')
+    email_log = session.scalar(select(EmailLog).where(EmailLog.email_id == selected_email_id))
+    if email_log is None:
+        email_log = session.scalar(select(EmailLog).where(EmailLog.message_id == selected_email_id))
+    if email_log is None:
+        raise EmailSyncError(f'Email record not found for id: {selected_email_id}')
+
+    message = fetch_message_by_email_identifier(
+        client=client,
+        folder=folder,
+        email_id=email_log.email_id,
+        message_id=email_log.message_id,
+    )
+    if message is None:
+        raise EmailSyncError('Selected email could not be fetched from IMAP.')
+
+    processing = process_email_message_attachments(
+        session=session,
+        message=message,
+        source_email_id=email_log.email_id or selected_email_id,
+        source_message_id=email_log.message_id,
+        source_type='email_selected',
+    )
+
+    email_log.status = 'processed' if processing['processed_documents'] > 0 and processing['errors'] == 0 else processing['status']
+    email_log.processed_flag = email_log.status == 'processed'
+    email_log.error_message = processing.get('error_message')
+    session.commit()
+
+    return {
+        'status': 'success' if processing['processed_documents'] > 0 else 'failed',
+        'message': 'Email attachment processed' if processing['processed_documents'] > 0 else processing.get('error_message') or 'Email attachment processing failed',
+        'records_inserted': processing['records_inserted'],
+        'processed_documents': processing['processed_documents'],
+        'errors': processing['errors'],
+    }
+
+
+def process_email_message_attachments(
+    session: Session,
+    message: Message,
+    source_email_id: str,
+    source_message_id: str,
+    source_type: str,
+) -> dict:
+    attachments = extract_attachments(message)
+    if not attachments:
+        return {
+            'status': 'no_attachments',
+            'processed_documents': 0,
+            'records_inserted': 0,
+            'errors': 1,
+            'error_message': 'No attachment found in selected email.',
+        }
+
+    processed_documents = 0
+    total_inserted = 0
+    errors = 0
+    skipped_unsupported = 0
+    last_error: str | None = None
+
+    for attachment in attachments:
+        print(f'Attachment found: {attachment.filename}')
+        extension = Path(attachment.filename).suffix.lower()
+        if extension not in SUPPORTED_EMAIL_ATTACHMENT_EXTENSIONS:
+            skipped_unsupported += 1
+            logger.info('Skipping unsupported attachment: %s', attachment.filename)
+            continue
+
+        try:
+            validate_filename(attachment.filename)
+            saved_path = save_email_attachment(attachment)
+            print(f'File saved: {saved_path}')
+            print('Processing started')
+            inserted = process_saved_attachment_document(
+                session=session,
+                saved_path=saved_path,
+                attachment=attachment,
+                source_type=source_type,
+                source_message_id=source_message_id,
+            )
+            processed_documents += 1
+            total_inserted += inserted
+            print(f'Records inserted: {inserted}')
+        except Exception as exc:
+            errors += 1
+            last_error = str(exc)
+            logger.exception('Failed to process attachment %s', attachment.filename)
+
+    if processed_documents == 0 and skipped_unsupported > 0:
+        return {
+            'status': 'failed',
+            'processed_documents': 0,
+            'records_inserted': 0,
+            'errors': max(1, errors),
+            'error_message': 'No supported attachment found. Only PDF and Excel files are allowed.',
+        }
+
+    return {
+        'status': 'processed' if processed_documents > 0 and errors == 0 else 'failed',
+        'processed_documents': processed_documents,
+        'records_inserted': total_inserted,
+        'errors': errors,
+        'source_email_id': source_email_id,
+        'error_message': last_error,
+    }
+
+
+def save_email_attachment(attachment: EmailAttachment) -> Path:
+    EMAIL_ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(attachment.filename).suffix
+    safe_name = Path(attachment.filename).stem.replace(' ', '_')
+    target_name = f'{safe_name}_{uuid4().hex[:8]}{suffix}'
+    destination = EMAIL_ATTACHMENT_DIR / target_name
+    destination.write_bytes(attachment.payload)
+    return destination
+
+
+def process_saved_attachment_document(
+    session: Session,
+    saved_path: Path,
+    attachment: EmailAttachment,
+    source_type: str,
+    source_message_id: str,
+) -> int:
+    extension = saved_path.suffix.lower()
+    unique_source_message_id = f'{source_message_id}:{uuid4().hex[:8]}'
+    document = Document(
+        filename=saved_path.name,
+        original_name=attachment.filename,
+        content_type=attachment.content_type,
+        file_type=extension.lstrip('.') or 'unknown',
+        file_path=str(saved_path),
+        source_type=source_type,
+        source_message_id=unique_source_message_id,
+        status='pending',
+    )
+    session.add(document)
+    session.flush()
+
+    text, extracted, processed_type, extracted_rows = process_document(saved_path)
+    print('EXTRACTED DATA:', asdict(extracted))
+    validation = validate_extracted_fields(extracted)
+    print('VALIDATED DATA:', {'status': validation.status, 'is_valid': validation.is_valid, 'messages': validation.messages})
+
+    session.execute(update(Document).values(is_latest=False))
+    document.is_latest = True
+    document.extracted_text = text
+    document.file_type = processed_type
+
+    all_rows = extracted_rows or [extracted]
+    inserted = 0
+    failed_rows = 0
+    skipped_rows = 0
+
+    for row in all_rows:
+        try:
+            row_validation = validate_extracted_fields(row)
+            if not is_row_acceptable(row):
+                skipped_rows += 1
+                continue
+            student = upsert_student(session, row.usn, row.student_name)
+            result = Result(
+                document_id=document.id,
+                student_id=student.id if student else None,
+                student_name=row.student_name,
+                usn=row.usn,
+                subject=row.subject or row.subject_name,
+                subject_code=row.subject_code,
+                subject_name=row.subject_name or row.subject,
+                grade=row.grade,
+                grade_points=row.grade_points,
+                sgpa=row.sgpa,
+                raw_text=text,
+                validation_status='validated' if row_validation.is_valid else row_validation.status,
+                validation_message='; '.join(row_validation.messages) if row_validation.messages else None,
+            )
+            session.add(result)
+            inserted += 1
+        except Exception:
+            failed_rows += 1
+            continue
+
+    processed_ratio = (inserted / len(all_rows)) if all_rows else 0.0
+    if inserted == 0:
+        document.status = 'failed'
+    elif processed_ratio > 0.8:
+        document.status = 'success'
+    else:
+        document.status = 'completed_with_errors'
+
+    document.error_message = '; '.join(validation.messages) if validation.messages else None
+    print('Total rows:', len(all_rows))
+    print('Inserted:', inserted)
+    print('Failed:', failed_rows)
+    print('Skipped:', skipped_rows)
+    return inserted

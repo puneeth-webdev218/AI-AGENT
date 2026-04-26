@@ -135,6 +135,14 @@ export function listEmailLogs() {
   return request('/emails/logs');
 }
 
+export function processEmailById(emailId, payload = {}) {
+  return request(`/email/process/${encodeURIComponent(emailId)}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    operationLabel: 'Email attachment processing',
+  });
+}
+
 export function beginGmailOAuth(redirectUri) {
   const params = new URLSearchParams();
   if (redirectUri) {

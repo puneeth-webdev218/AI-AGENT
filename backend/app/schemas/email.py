@@ -61,3 +61,20 @@ class EmailLogResponse(BaseModel):
     status: str
     processed_flag: bool = False
     error_message: str | None = None
+
+
+class EmailProcessRequest(BaseModel):
+    host: str | None = None
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None
+    folder: str | None = None
+    use_ssl: bool | None = None
+
+
+class EmailProcessResponse(BaseModel):
+    status: str
+    message: str
+    records_inserted: int = 0
+    processed_documents: int = 0
+    errors: int = 0

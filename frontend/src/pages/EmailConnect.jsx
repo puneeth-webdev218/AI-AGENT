@@ -5,6 +5,7 @@ import {
   fetchGmailEmails,
   fetchResultEmails,
   getGmailConnectionStatus,
+  processEmailById,
 } from '../lib/api';
 import { SectionCard } from '../components/SectionCard';
 
@@ -18,6 +19,7 @@ export function EmailConnect() {
   const [resultEmails, setResultEmails] = useState([]);
   const [checkingResults, setCheckingResults] = useState(false);
   const [analyzingId, setAnalyzingId] = useState('');
+  const [processingEmailId, setProcessingEmailId] = useState('');
   const [error, setError] = useState('');
   const [maxResults, setMaxResults] = useState(10);
   const queryParams = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -112,6 +114,25 @@ export function EmailConnect() {
     }
   }
 
+  async function processSelectedEmail(emailId) {
+    if (!emailId) {
+      setError('Selected email has no id.');
+      return;
+    }
+    setProcessingEmailId(emailId);
+    setError('');
+    try {
+      const payload = await processEmailById(emailId);
+      const inserted = payload.records_inserted ?? 0;
+      setStatusMessage(`Email attachment processed. Records inserted: ${inserted}`);
+    } catch (err) {
+      setError(err.message || 'Failed to process selected email attachment');
+      setStatusMessage('Email processing failed.');
+    } finally {
+      setProcessingEmailId('');
+    }
+  }
+
   return (
     <SectionCard title="Email integration" description="Connect Gmail securely with OAuth2 and fetch inbox emails directly.">
       <div className="grid gap-4 md:grid-cols-3">
@@ -189,6 +210,14 @@ export function EmailConnect() {
                 <div className="text-xs text-slate-300">From: {emailItem.from || '-'}</div>
                 <div className="text-xs text-slate-300">Date: {emailItem.date || '-'}</div>
                 <div className="mt-2 text-xs text-slate-300">Snippet: {emailItem.snippet || '-'}</div>
+                <button
+                  type="button"
+                  onClick={() => processSelectedEmail(emailItem.id || emailItem.messageId)}
+                  disabled={Boolean(processingEmailId)}
+                  className="mt-3 rounded-full border border-signal-300/60 px-3 py-1 text-xs text-signal-200 hover:bg-signal-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {processingEmailId === (emailItem.id || emailItem.messageId) ? 'Processing...' : 'Analyze / Process'}
+                </button>
               </div>
             ))}
           </div>
