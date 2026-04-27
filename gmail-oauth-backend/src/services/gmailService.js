@@ -149,7 +149,7 @@ function decodeBase64Url(data) {
   return Buffer.from(normalized, 'base64');
 }
 
-export async function extractPdfAttachments(gmail, messageId) {
+export async function extractSupportedAttachments(gmail, messageId) {
   console.log('[email] Fetching attachments...');
 
   const message = await gmail.users.messages.get({
@@ -159,12 +159,16 @@ export async function extractPdfAttachments(gmail, messageId) {
   });
 
   const parts = collectParts(message.data.payload, []);
-  const pdfParts = parts.filter((part) => (part.filename || '').toLowerCase().endsWith('.pdf'));
+  const supportedExtensions = ['.pdf', '.xlsx', '.xls'];
+  const supportedParts = parts.filter((part) => {
+    const filename = (part.filename || '').toLowerCase();
+    return supportedExtensions.some(ext => filename.endsWith(ext));
+  });
 
   const files = [];
-  for (const part of pdfParts) {
+  for (const part of supportedParts) {
     const attachmentId = part.body?.attachmentId;
-    const filename = part.filename || `attachment-${messageId}.pdf`;
+    const filename = part.filename || `attachment-${messageId}`;
 
     let buffer;
     if (attachmentId) {
@@ -179,7 +183,8 @@ export async function extractPdfAttachments(gmail, messageId) {
     }
 
     if (buffer.length > 0) {
-      console.log('[email] PDF found');
+      const ext = filename.toLowerCase().endsWith('.pdf') ? 'PDF' : 'Excel';
+      console.log(`[email] ${ext} attachment found: ${filename}`);
       files.push({ filename, buffer });
     }
   }
@@ -190,6 +195,6 @@ export async function extractPdfAttachments(gmail, messageId) {
 export async function fetchAndExtractPdfAttachments(messageId) {
   const gmail = getAuthenticatedGmailClient();
   const email = await getMessageMetadata(gmail, messageId);
-  const pdfAttachments = await extractPdfAttachments(gmail, messageId);
+  const pdfAttachments = await extractSupportedAttachments(gmail, messageId);
   return { email, pdfAttachments };
 }

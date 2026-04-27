@@ -53,7 +53,7 @@ emailRouter.post('/emails/analyze/:messageId', async (req, res) => {
     const { email, pdfAttachments } = await fetchAndExtractPdfAttachments(messageId);
 
     if (!pdfAttachments.length) {
-      return res.status(404).json({ error: 'No PDF found in selected email.' });
+      return res.status(404).json({ error: 'No supported attachments found (PDF/Excel).' });
     }
 
     const analyses = [];
@@ -71,7 +71,7 @@ emailRouter.post('/emails/analyze/:messageId', async (req, res) => {
     });
 
     return res.json({
-      message: 'Email PDF analyzed successfully.',
+      message: 'Email attachments analyzed successfully.',
       email: {
         messageId,
         subject: email.subject,
